@@ -193,6 +193,8 @@ def count_users_each_sheet_by_ref(file_path: str):
     
     pivot_table.to_excel("output/count_users_each_sheet_by_ref.xlsx")
 
+
+
 def count_users_each_sheet_by_date(file_path: str):
     df_dict = pd.read_excel(file_path, sheet_name=None)
         
@@ -242,16 +244,16 @@ def count_users_each_sheet_by_date(file_path: str):
 if __name__ == "__main__":
     file_path = "E:\\Code\\py\\statistical\\input\\data.xlsx"
     
-    # count_daily_registers_by_source_name(file_path)
+    count_daily_registers_by_source_name(file_path)
     
-    # count_daily_registers_by_ref(file_path)
+    count_daily_registers_by_ref(file_path)
 
-    # count_users_by_source_name(file_path)
+    count_users_by_source_name(file_path)
 
-    # count_users_by_ref(file_path)
+    count_users_by_ref(file_path)
 
-    # count_users_each_sheet_by_source_name(file_path)
+    count_users_each_sheet_by_source_name(file_path)
 
-    # count_users_each_sheet_by_ref(file_path)
+    count_users_each_sheet_by_ref(file_path)
 
-    # count_users_each_sheet_by_date(file_path)
+    count_users_each_sheet_by_date(file_path)
