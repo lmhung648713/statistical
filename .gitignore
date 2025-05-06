@@ -1,2 +1,5 @@
 input
 output
+.gradio
+.venv
+statistical_processor.log
