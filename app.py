@@ -66,10 +66,11 @@ class ExcelDataProcessor:
     def count_daily_registers_by_ref(self, df):
         """Count daily registers by reference"""
         logger.info("Starting count_daily_registers_by_ref")
-        df_filtered = df[df['Ref By'].notna()].copy()
+        df_filtered = df.copy()
         df_filtered.loc[:, 'Created At'] = pd.to_datetime(df_filtered['Created At']).dt.date
         target_date = datetime.date(2025, 4, 15)
         df_filtered = df_filtered[df_filtered['Created At'] < target_date].copy()
+        df_filtered.loc[(df_filtered['Source Name'] == 'direct') & (df_filtered['Ref By'].isna()), 'Ref By'] = 'direct'
         pivot_table = pd.pivot_table(
             df_filtered,
             index='Ref By',
@@ -111,12 +112,12 @@ class ExcelDataProcessor:
     def count_users_by_ref(self, df):
         """Count unique users by reference"""
         logger.info("Starting count_users_by_ref")
-        df_copy = df.copy()
-        df_filtered = df_copy[df_copy['Ref By'].notna()].copy()
+        df_filtered = df.copy()
         df_filtered = df_filtered.drop_duplicates(subset=['User ID'], keep='first')
         target_date = datetime.date(2025, 4, 15)
         df_filtered['Created At'] = pd.to_datetime(df_filtered['Created At']).dt.date
         df_filtered = df_filtered[df_filtered['Created At'] < target_date].copy()
+        df_filtered.loc[(df_filtered['Source Name'] == 'direct') & (df_filtered['Ref By'].isna()), 'Ref By'] = 'direct'
         pivot_table = pd.pivot_table(
             df_filtered,
             index='Ref By',
@@ -183,10 +184,11 @@ class ExcelDataProcessor:
             ignore_index=True
         )
         combined_df = combined_df.dropna(how='all').copy()
-        combined_df_filtered = combined_df[combined_df['Ref By'].notna()].copy()
+        combined_df_filtered = combined_df.copy()
         combined_df_filtered['Created At'] = pd.to_datetime(combined_df_filtered['Created At']).dt.date
         target_date = datetime.date(2025, 4, 15)
         combined_df_filtered = combined_df_filtered[combined_df_filtered['Created At'] < target_date].copy()
+        combined_df_filtered.loc[(combined_df_filtered['Source Name'] == 'direct') & (combined_df_filtered['Ref By'].isna()), 'Ref By'] = 'direct'
         if not {'Ref By', 'User ID', 'SheetName'}.issubset(combined_df_filtered.columns):
             return "Required columns 'Ref By', 'User ID', or 'SheetName' not found", None
         pivot_table = pd.pivot_table(
