@@ -43,7 +43,7 @@ class ExcelDataProcessor:
     def count_daily_registers_by_source_name(self, df):
         """Count daily registers by source name"""
         logger.info("Starting count_daily_registers_by_source_name")
-        df_filtered = df.copy()
+        df_filtered = df[df['User ID'].notna()].copy()
         df_filtered.loc[:, 'Created At'] = pd.to_datetime(df_filtered['Created At']).dt.date
         target_date = datetime.date(2025, 4, 14)
         df_filtered = df_filtered[df_filtered['Created At'] > target_date].copy()
@@ -66,7 +66,7 @@ class ExcelDataProcessor:
     def count_daily_registers_by_ref(self, df):
         """Count daily registers by reference"""
         logger.info("Starting count_daily_registers_by_ref")
-        df_filtered = df.copy()
+        df_filtered = df[df['User ID'].notna()].copy()
         df_filtered.loc[:, 'Created At'] = pd.to_datetime(df_filtered['Created At']).dt.date
         target_date = datetime.date(2025, 4, 15)
         df_filtered = df_filtered[df_filtered['Created At'] < target_date].copy()
@@ -90,7 +90,7 @@ class ExcelDataProcessor:
     def count_users_by_source_name(self, df):
         """Count unique users by source name"""
         logger.info("Starting count_users_by_source_name")
-        df_filtered = df.copy()
+        df_filtered = df[df['User ID'].notna()].copy()
         df_filtered = df_filtered.drop_duplicates(subset=['User ID'], keep='first')
         target_date = datetime.date(2025, 4, 14)
         df_filtered['Created At'] = pd.to_datetime(df_filtered['Created At']).dt.date
@@ -112,7 +112,7 @@ class ExcelDataProcessor:
     def count_users_by_ref(self, df):
         """Count unique users by reference"""
         logger.info("Starting count_users_by_ref")
-        df_filtered = df.copy()
+        df_filtered = df[df['User ID'].notna()].copy()
         df_filtered = df_filtered.drop_duplicates(subset=['User ID'], keep='first')
         target_date = datetime.date(2025, 4, 15)
         df_filtered['Created At'] = pd.to_datetime(df_filtered['Created At']).dt.date
@@ -145,7 +145,7 @@ class ExcelDataProcessor:
             axis=0,
             ignore_index=True
         )
-        combined_df = combined_df.dropna(how='all').copy()
+        combined_df = combined_df[combined_df['User ID'].notna()].copy()
         combined_df_filtered = combined_df.dropna(subset=['Source Name']).copy()
         combined_df_filtered['Created At'] = pd.to_datetime(combined_df_filtered['Created At']).dt.date
         target_date = datetime.date(2025, 4, 14)
@@ -183,7 +183,7 @@ class ExcelDataProcessor:
             axis=0,
             ignore_index=True
         )
-        combined_df = combined_df.dropna(how='all').copy()
+        combined_df = combined_df[combined_df['User ID'].notna()].copy()
         combined_df_filtered = combined_df.copy()
         combined_df_filtered['Created At'] = pd.to_datetime(combined_df_filtered['Created At']).dt.date
         target_date = datetime.date(2025, 4, 15)
@@ -222,7 +222,7 @@ class ExcelDataProcessor:
             axis=0,
             ignore_index=True
         )
-        combined_df = combined_df.dropna(how='all').copy()
+        combined_df = combined_df[combined_df['User ID'].notna()].copy()
         combined_df_filtered = combined_df[combined_df['Created At'].notna()].copy()
         combined_df_filtered.loc[:, 'Created At'] = pd.to_datetime(combined_df_filtered['Created At']).dt.date
         if not {'Created At', 'User ID', 'SheetName'}.issubset(combined_df_filtered.columns):
