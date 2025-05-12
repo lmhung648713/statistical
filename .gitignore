@@ -2,4 +2,5 @@ input
 output
 .gradio
 .venv
-statistical_processor.log
+drive_processor.log
+service_account.json
