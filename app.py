@@ -1,7 +1,5 @@
-import time
-import pandas as pd
 import logging
-from datetime import date, datetime
+import pandas as pd
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
@@ -16,158 +14,65 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Google Drive folder path
-FOLDER_ID = '1OAgBQotTPAhSnreHt3rR0VW61j-k6_1g'
+# Configuration
+CONFIG = {
+    'scopes': ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets'],
+    'service_account_file': 'service_account.json',
+    'user_register_sheet': 'User Register',
+    'start_date_filter': '2025-04-15',
+    'date_format': '%d/%m/%Y',
+    'column_mappings': {
+        'source_name': lambda col: 'source' in col.lower() and 'name' in col.lower(),
+        'ref_by': lambda col: 'ref' in col.lower() and 'by' in col.lower(),
+        'created_at': lambda col: 'created' in col.lower() and 'at' in col.lower(),
+    }
+}
 
-# Required access scopes
-SCOPES = ['https://www.googleapis.com/auth/drive',
-          'https://www.googleapis.com/auth/spreadsheets']
-
-class DriveDataProcessor:
-    def __init__(self, folder_id, filter_date = True):
-        """Initialize processor with Google Drive and Sheets connections."""
-        self.drive_service, self.sheets_service = self.authenticate_google_services()
-        self.folder_id = folder_id
-        self.filter_date = filter_date
-        self.user_register_dataframe = self.get_user_register_dataframe()
-        self.videos_dataframe = self.get_videos_dateframe()
-        if not self.drive_service or not self.sheets_service:
-            logger.error("Cannot authenticate with Google API. Please check service_account.json file")
-            raise Exception("Google API authentication error")
-        logger.info("DriveDataProcessor initialized successfully")
+class GoogleServiceManager:
+    """Handles Google Drive and Sheets API interactions."""
     
-    def get_videos_dateframe(self):
-        try:
-            # Step 1: Find the 'data' spreadsheet
-            data_spreadsheet_id = self.find_file_in_folder('data')
-            if not data_spreadsheet_id:
-                logger.error("Could not find 'data' spreadsheet")
-                return None
-                
-            # Step 2: Get all sheet names from the spreadsheet
-            sheets_metadata = self.sheets_service.spreadsheets().get(
-                spreadsheetId=data_spreadsheet_id
-            ).execute()
-            
-            sheet_names = [sheet['properties']['title'] for sheet in sheets_metadata.get('sheets', [])]
-            
-            # Step 3: Read data from each sheet and store in a dictionary
-            df_dict = {}
-            for sheet_name in sheet_names:
-                sheet_data = self.read_spreadsheet_data(data_spreadsheet_id, sheet_name)
-                if sheet_data and len(sheet_data) > 1:  # Has header and at least one row
-                    df = self.convert_to_dataframe(sheet_data)
-                    if df is not None:
-                        df_dict[sheet_name] = df
-            
-            if not df_dict:
-                logger.warning("No valid sheets found with data")
-                return None
-                
-            # Step 4: Filter sheets with course content (numbered sheets)
-            # Exclude 'User Register' sheet as it's not part of the course content
-            sheet_dfs = {sheet_name: df for sheet_name, df in df_dict.items() 
-                        if sheet_name != 'User Register' and any(char.isdigit() for char in sheet_name)}
-            
-            if not sheet_dfs:
-                # Try all sheets except User Register if no numbered sheets found
-                sheet_dfs = {sheet_name: df for sheet_name, df in df_dict.items() 
-                            if sheet_name != 'User Register'}
-                
-            if not sheet_dfs:
-                logger.warning("No valid sheets found")
-                return None
-            
-            # Step 5: Combine DataFrames with SheetName column
-            combined_df = pd.concat(
-                [df.assign(SheetName=sheet_name) for sheet_name, df in sheet_dfs.items()],
-                axis=0,
-                ignore_index=True
-            )
-            
-            return combined_df
-        except Exception as e:
-            logger.error(f"Error getting video data: {e}")
-            return None
-
-    def get_user_register_dataframe(self):
-        try:
-            # Step 1: Find the 'data' spreadsheet
-            data_spreadsheet_id = self.find_file_in_folder('data')
-            if not data_spreadsheet_id:
-                logger.error("Could not find 'data' spreadsheet")
-                return None
-                
-            # Step 2: Read user data from 'User Register' sheet
-            user_data = self.read_spreadsheet_data(data_spreadsheet_id, 'User Register')
-            if not user_data or len(user_data) <= 1:
-                logger.warning("No user data available to process in 'User Register' sheet")
-                return None
-            
-            user_df = self.convert_to_dataframe(user_data)
-            if user_df is None:
-                return None
-            
-            return user_df
-        except Exception as e:
-            logger.error(f"Error getting user register data: {e}")
-            return None
-
-    def authenticate_google_services(self):
+    def __init__(self, service_account_file, scopes):
+        self.drive_service, self.sheets_service = self._authenticate(service_account_file, scopes)
+        if not self.drive_service or not self.sheets_service:
+            logger.error("Failed to authenticate with Google API")
+            raise Exception("Google API authentication error")
+    
+    def _authenticate(self, service_account_file, scopes):
         """Authenticate with Google API and return Drive and Sheets services."""
         try:
-            # Get credentials from service_account.json file
-            creds = Credentials.from_service_account_file('service_account.json', scopes=SCOPES)
-            
-            # Create Drive and Sheets services
-            drive_service = build('drive', 'v3', credentials=creds)
-            sheets_service = build('sheets', 'v4', credentials=creds)
-            
-            logger.info("Google API authentication successful")
-            return drive_service, sheets_service
+            creds = Credentials.from_service_account_file(service_account_file, scopes=scopes)
+            return build('drive', 'v3', credentials=creds), build('sheets', 'v4', credentials=creds)
         except Exception as e:
             logger.error(f"Authentication error: {e}")
             return None, None
-
-    def find_file_in_folder(self, file_name):
-        """Find file in folder with specific name."""
+    
+    def find_file_in_folder(self, folder_id, file_name):
+        """Find a file in the specified folder by name."""
         try:
-            query = f"'{self.folder_id}' in parents and name = '{file_name}' and trashed = false"
-            results = self.drive_service.files().list(
-                q=query,
-                fields="files(id, name)"
-            ).execute()
+            query = f"'{folder_id}' in parents and name = '{file_name}' and trashed = false"
+            results = self.drive_service.files().list(q=query, fields="files(id, name)").execute()
             files = results.get('files', [])
-            
             if files:
                 logger.info(f"Found file '{file_name}' with ID: {files[0]['id']}")
                 return files[0]['id']
-            else:
-                logger.info(f"File '{file_name}' not found in folder")
-                return None
+            logger.info(f"File '{file_name}' not found in folder")
+            return None
         except Exception as e:
             logger.error(f"Error finding file '{file_name}': {e}")
             return None
-
-    def create_spreadsheet(self, file_name):
-        """Create a new Google Spreadsheet in the folder."""
+    
+    def create_spreadsheet(self, folder_id, file_name):
+        """Create a new Google Spreadsheet and move it to the specified folder."""
         try:
-            # Create empty file
-            spreadsheet_body = {
-                'properties': {
-                    'title': file_name
-                }
-            }
+            spreadsheet_body = {'properties': {'title': file_name}}
             spreadsheet = self.sheets_service.spreadsheets().create(body=spreadsheet_body).execute()
             spreadsheet_id = spreadsheet['spreadsheetId']
             
-            # Move file to specified folder
             file = self.drive_service.files().get(fileId=spreadsheet_id, fields='parents').execute()
             previous_parents = ",".join(file.get('parents', []))
-            
             self.drive_service.files().update(
                 fileId=spreadsheet_id,
-                addParents=FOLDER_ID,
+                addParents=folder_id,
                 removeParents=previous_parents,
                 fields='id, parents'
             ).execute()
@@ -177,853 +82,533 @@ class DriveDataProcessor:
         except Exception as e:
             logger.error(f"Error creating spreadsheet '{file_name}': {e}")
             return None
-
+    
     def read_spreadsheet_data(self, spreadsheet_id, range_name):
-        """Read data from Google Spreadsheet."""
+        """Read data from a Google Spreadsheet."""
         try:
             result = self.sheets_service.spreadsheets().values().get(
-                spreadsheetId=spreadsheet_id,
-                range=range_name
-            ).execute()
-            
+                spreadsheetId=spreadsheet_id, range=range_name).execute()
             values = result.get('values', [])
-            logger.info(f"Successfully read {len(values)} rows from {range_name}")
-
+            logger.info(f"Read {len(values)} rows from {range_name}")
+            
+            # Ensure each row has at least 7 columns
             for row in values:
-                if len(row) < 7:
+                while len(row) < 7:
                     row.append('')
-
             return values
         except Exception as e:
             logger.error(f"Error reading data from {range_name}: {e}")
             return []
-
+    
     def write_spreadsheet_data(self, spreadsheet_id, range_name, values):
-        """Write data to Google Spreadsheet."""
+        """Write data to a Google Spreadsheet."""
         try:
-            body = {
-                'values': values
-            }
+            body = {'values': values}
             result = self.sheets_service.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
                 range=range_name,
                 valueInputOption='USER_ENTERED',
                 body=body
             ).execute()
-            
             logger.info(f"Wrote {result.get('updatedCells')} cells to {range_name}")
             return result
         except Exception as e:
             logger.error(f"Error writing data to {range_name}: {e}")
             return None
-
-    def get_or_create_result_file(self, file_name):
-        """Find or create result file."""
-        file_id = self.find_file_in_folder(file_name)
+    
+    def get_or_create_result_file(self, folder_id, file_name):
+        """Find or create a spreadsheet in the folder."""
+        file_id = self.find_file_in_folder(folder_id, file_name)
         if not file_id:
             logger.info(f"Creating new file '{file_name}'...")
-            file_id = self.create_spreadsheet(file_name)
-            if not file_id:
-                logger.error(f"Cannot create file '{file_name}'")
-                return None
+            file_id = self.create_spreadsheet(folder_id, file_name)
         return file_id
 
-    def convert_to_dataframe(self, data):
-        """Convert sheet data to DataFrame."""
+class DataFrameProcessor:
+    """Handles DataFrame processing and formatting for Google Sheets."""
+    
+    @staticmethod
+    def extract_date(series, date_format='%Y-%m-%d'):
+        """Extract and standardize date from a series, handling multiple formats."""
+        def parse_date(x):
+            if pd.isna(x) or x == '':
+                return pd.NaT
+            if isinstance(x, str):
+                # Handle ISO 8601 format (e.g., 2025-05-11T19:50:53Z)
+                if 'T' in x:
+                    return pd.to_datetime(x, errors='coerce').date()
+                # Handle DD-MM-YYYY format (e.g., 20-03-2025)
+                if '-' in x and x.count('-') == 2:
+                    try:
+                        return pd.to_datetime(x, format='%d-%m-%Y', errors='coerce').date()
+                    except:
+                        pass
+            # Fallback to general parsing
+            return pd.to_datetime(x, errors='coerce').date()
+        
+        return pd.to_datetime(series.apply(parse_date), errors='coerce')
+    
+    @staticmethod
+    def filter_by_date(df, date_column, milestone, filter_enabled=True, field = "Source Name"):
+        """Filter DataFrame by date, starting from milestone."""
+        if not filter_enabled:
+            return df
+        df = df.copy()
+        df['Date_Obj'] = pd.to_datetime(df[date_column], errors='coerce')
+        if field == "Source Name":
+            filtered_df = df[df['Date_Obj'] >= pd.to_datetime(milestone)].drop('Date_Obj', axis=1)
+            logger.info(f"Filtered data from {milestone}, remaining rows: {len(filtered_df)}")
+        else:
+            filtered_df = df[df['Date_Obj'] < pd.to_datetime(milestone)].drop('Date_Obj', axis=1)
+            logger.info(f"Filtered data before {milestone}, remaining rows: {len(filtered_df)}")
+        return filtered_df
+    
+    @staticmethod
+    def create_pivot_table(df, index, columns, values, aggfunc='count', fill_value=0):
+        """Create a pivot table from the DataFrame."""
+        return pd.pivot_table(
+            df, index=index, columns=columns, values=values,
+            aggfunc=aggfunc, fill_value=fill_value
+        )
+    
+    @staticmethod
+    def sort_columns(pivot_table, sort_key_func):
+        """Sort pivot table columns using the provided key function."""
+        if pivot_table.columns.size > 0:
+            try:
+                sorted_columns = sorted(pivot_table.columns, key=sort_key_func)
+                return pivot_table[sorted_columns]
+            except Exception as e:
+                logger.warning(f"Could not sort columns: {e}")
+        return pivot_table
+    
+    @staticmethod
+    def format_for_sheets(pivot_table, index_name, date_format=None):
+        """Format pivot table for Google Sheets, ensuring all Timestamp objects are converted to strings."""
+        result_df = pivot_table.reset_index()
+        
+        # Convert index column (e.g., Source Name or Registration Date) to string if datetime
+        if pd.api.types.is_datetime64_any_dtype(result_df[index_name]):
+            result_df[index_name] = result_df[index_name].dt.strftime(date_format or '%Y-%m-%d')
+        
+        # Convert all datetime columns in result_df to strings
+        for col in result_df.columns:
+            if pd.api.types.is_datetime64_any_dtype(result_df[col]):
+                result_df[col] = result_df[col].dt.strftime(date_format or '%Y-%m-%d')
+        
+        # Handle NaT or NaN values
+        result_df = result_df.fillna('')
+        
+        # Convert pivot table column names (dates) to strings
+        formatted_columns = [
+            col.strftime(date_format or '%Y-%m-%d') if isinstance(col, pd.Timestamp)
+            else str(col)
+            for col in pivot_table.columns
+        ]
+        
+        header = [index_name] + formatted_columns
+        result_data = [
+            [
+                val.strftime(date_format or '%Y-%m-%d') if isinstance(val, pd.Timestamp)
+                else '' if pd.isna(val)
+                else val.item() if hasattr(val, 'item')
+                else val
+                for val in row
+            ] for row in result_df.values
+        ]
+        
+        totals = ['Total'] + [int(pivot_table[col].sum()) for col in pivot_table.columns]
+        return [header] + result_data + [totals]
+    
+    @staticmethod
+    def simple_count(df, column, count_column='Count'):
+        """Count occurrences of values in a column."""
+        counts = df[column].value_counts().reset_index()
+        counts.columns = [column, count_column]
+        total = pd.DataFrame([[f'Total', counts[count_column].sum()]], columns=[column, count_column])
+        counts = pd.concat([counts, total], ignore_index=True)
+        
+        header = counts.columns.tolist()
+        result_data = [
+            [val.item() if hasattr(val, 'item') else val for val in row]
+            for row in counts.values
+        ]
+        return [header] + result_data
+
+class DriveDataProcessor:
+    """Processes data from Google Drive spreadsheets and generates reports."""
+    
+    def __init__(self, folder_id, data_spreadsheet_name = 'data', filter_date=True):
+        """Initialize processor with Google services and data."""
+        self.google_service = GoogleServiceManager(CONFIG['service_account_file'], CONFIG['scopes'])
+        self.folder_id = folder_id
+        self.filter_date = filter_date
+        self.user_register_dataframe = self._get_user_register_dataframe(data_speadsheet_name)
+        self.videos_dataframe = self._get_videos_dataframe(data_speadsheet_name)
+        logger.info("DriveDataProcessor initialized successfully")
+    
+    def _get_user_register_dataframe(self, data_spreadsheet_name):
+        """Load user register data from the 'User Register' sheet."""
+        spreadsheet_id = self.google_service.find_file_in_folder(self.folder_id, data_spreadsheet_name)
+        if not spreadsheet_id:
+            logger.error(f"Could not find '{data_spreadsheet_name}' spreadsheet")
+            return None
+        
+        data = self.google_service.read_spreadsheet_data(spreadsheet_id, CONFIG['user_register_sheet'])
+        if not data or len(data) <= 1:
+            logger.warning(f"No data in '{CONFIG['user_register_sheet']}' sheet")
+            return None
+        
+        df = self._to_dataframe(data)
+        if df is None:
+            return None
+        
+        logger.info(f"Loaded {len(df)} rows from User Register sheet")
+        return df
+    
+    def _get_videos_dataframe(self, data_spreadsheet_name):
+        """Load video data from all relevant sheets except 'User Register'."""
+        spreadsheet_id = self.google_service.find_file_in_folder(self.folder_id, data_spreadsheet_name)
+        if not spreadsheet_id:
+            logger.error(f"Could not find '{data_spreadsheet_name}' spreadsheet")
+            return None
+        
+        sheets_metadata = self.google_service.sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        sheet_names = [sheet['properties']['title'] for sheet in sheets_metadata.get('sheets', [])]
+        
+        df_dict = {}
+        for sheet_name in sheet_names:
+            if sheet_name == CONFIG['user_register_sheet']:
+                continue
+            data = self.google_service.read_spreadsheet_data(spreadsheet_id, sheet_name)
+            if data and len(data) > 1:
+                df = self._to_dataframe(data)
+                if df is not None:
+                    df_dict[sheet_name] = df
+                    logger.info(f"Loaded {len(df)} rows from sheet '{sheet_name}'")
+        
+        if not df_dict:
+            logger.warning("No valid sheets found with data")
+            return None
+        
+        sheet_dfs = {
+            name: df for name, df in df_dict.items()
+            if any(char.isdigit() for char in name)
+        } or {name: df for name, df in df_dict.items()}
+        
+        if not sheet_dfs:
+            logger.warning("No valid sheets found")
+            return None
+        
+        combined_df = pd.concat(
+            [df.assign(SheetName=name) for name, df in sheet_dfs.items()],
+            axis=0, ignore_index=True
+        )
+        logger.info(f"Combined {len(combined_df)} rows into videos_dataframe")
+        return combined_df
+    
+    def _to_dataframe(self, data):
+        """Convert raw sheet data to a DataFrame with standardized Created At column."""
         if not data or len(data) <= 1:
             logger.warning("Empty data or only header")
             return None
         
-        headers = data[0]
-        df = pd.DataFrame(data[1:], columns=headers)
+        df = pd.DataFrame(data[1:], columns=data[0])
+        if 'Created At' in df.columns:
+            df['Created At'] = DataFrameProcessor.extract_date(df['Created At'])
+            invalid_dates = df['Created At'].isna().sum()
+            if invalid_dates > 0:
+                logger.warning(f"Found {invalid_dates} invalid 'Created At' values")
         return df
-
-    def format_for_sheets(self, df):
-        """Format DataFrame for writing to Google Sheets."""
-        # Convert DataFrame to list of lists
-        if df is None or df.empty:
-            return [["No data available"]]
-        
-        # Get headers and records
-        headers = df.columns.tolist()
-        records = df.values.tolist()
-        
-        # Kết hợp headers và records
-        result = [headers] + records
-        return result
-
-    def count_daily_registers_by_source_name(self, output_spreadsheet_name=None):
-        """
-        Create a table that counts users registered per day from each source.
-        Reads data from the spreadsheet 'data', sheet 'User Register'.
-        
-        Args:
-            output_spreadsheet_name: Name for the output spreadsheet (if None, will use default name)
-        
-        Returns:
-            The ID of the created/updated spreadsheet with count statistics
-        """
-        try:
-            user_df = self.user_register_dataframe
-            if user_df is None:
-                return None
-                
-            # Step 3: Find the Source Name and Created At columns
-            source_name_col = None
-            created_at_col = None
-            
-            for col in user_df.columns:
-                if 'source' in col.lower() and 'name' in col.lower():
-                    source_name_col = col
-                if 'creat' in col.lower() and 'at' in col.lower():
-                    created_at_col = col
-            
-            if not source_name_col or not created_at_col:
-                logger.error("Required columns 'Source Name' and 'Created At' not found")
-                return None
-                
-            # Step 4: Extract just the date part from the datetime string
-            # Example format: 2025-05-05T07:56:26Z
-            user_df['Registration Date'] = user_df[created_at_col].apply(
-                lambda x: x.split('T')[0] if isinstance(x, str) and 'T' in x else x
-            )
-            
-            # Step 4.5: Filter for dates from April 15, 2025 onwards (no upper limit)
-            
-            # Define the start date (April 15, 2025)
-            start_date = '2025-04-15'
-            
-            # Convert Registration Date to datetime for comparison
-            user_df['Date_Obj'] = pd.to_datetime(user_df['Registration Date'], errors='coerce')
-            
-            # Filter the DataFrame to include only rows with dates from April 15, 2025 onwards
-            if self.filter_date:
-                user_df = user_df[user_df['Date_Obj'] >= pd.to_datetime(start_date)]
-            
-            logger.info(f"Filtered data from {start_date} onwards, remaining rows: {len(user_df)}")
-            
-            # Drop the helper column
-            user_df = user_df.drop('Date_Obj', axis=1)
-            
-            # Check if we have any data left after filtering
-            if len(user_df) == 0:
-                logger.warning("No data available after date filtering")
-                return None
-            
-            # Step 5: Group by date and source name and count
-            
-            # Create a count column (each row is one user)
-            user_df['count'] = 1
-            
-            # Create pivot table with dates as columns and source names as rows
-            pivot_df = pd.pivot_table(
-                user_df, 
-                values='count',
-                index=[source_name_col],
-                columns=['Registration Date'],
-                aggfunc='sum',
-                fill_value=0
-            )
-            
-            # Convert the pivot table to a regular DataFrame
-            result_df = pivot_df.reset_index()
-            
-            # Step 6: Add a 'total' row at the bottom
-            # First, calculate column sums excluding the source name column
-            totals = ['total']
-            for col in pivot_df.columns:
-                # Convert NumPy int64 to standard Python int
-                totals.append(int(pivot_df[col].sum()))
-            
-            # Convert to list of lists for Google Sheets and ensure all values are JSON serializable
-            result_data = []
-            for row in result_df.values:
-                # Convert each value in the row to standard Python types
-                converted_row = []
-                for val in row:
-                    if hasattr(val, 'item'):  # Check if it's a NumPy type with item() method
-                        converted_row.append(val.item())
-                    else:
-                        converted_row.append(val)
-                result_data.append(converted_row)
-            
-            # Create header row with Source Name and all dates
-            header = [source_name_col] + [str(col) for col in pivot_df.columns]
-            
-            # Final data for sheet
-            sheet_data = [header] + result_data + [totals]
-            
-            output_id = self.get_or_create_result_file(output_spreadsheet_name)
-            if not output_id:
-                logger.error("Failed to create or find output spreadsheet")
-                return None
-                
-            # Step 8: Write data to the spreadsheet
-            self.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
-            
-            logger.info(f"Successfully created daily source count in '{output_spreadsheet_name}'")
-            return output_id
-            
-        except Exception as e:
-            logger.error(f"Error creating daily source count: {e}")
+    
+    def _find_column(self, df, column_key):
+        """Find a column by its key in the configuration."""
+        if df is None:
+            return None
+        for col in df.columns:
+            if CONFIG['column_mappings'][column_key](col):
+                return col
+        return None
+    
+    def _prepare_combined_df(self, required_columns):
+        """Prepare the combined DataFrame with required columns and filters."""
+        if self.videos_dataframe is None:
+            logger.error("videos_dataframe is not initialized")
             return None
         
-    def count_daily_registers_by_ref(self, output_spreadsheet_name=None):
-        """
-        Create a table that counts users registered per day, grouped by referral source (Ref By).
-        Reads data from the spreadsheet 'data', sheet 'User Register'.
+        combined_df = self.videos_dataframe
+        for column in required_columns:
+            if column not in combined_df.columns:
+                logger.error(f"Required column '{column}' not found")
+                return None
         
-        Args:
-            output_spreadsheet_name: Name for the output spreadsheet (if None, will use default name)
-        
-        Returns:
-            The ID of the created/updated spreadsheet with count statistics
-        """
-        try:    
-            user_df = self.user_register_dataframe
-            if user_df is None:
-                return None
-                
-            # Step 3: Find the Ref By and Created At columns
-            ref_by_col = None
-            created_at_col = None
-            
-            for col in user_df.columns:
-                if 'ref' in col.lower() and 'by' in col.lower():
-                    ref_by_col = col
-                if 'creat' in col.lower() and 'at' in col.lower():
-                    created_at_col = col
-            
-            if not ref_by_col or not created_at_col:
-                logger.error("Required columns 'Ref By' and 'Created At' not found")
-                return None
-                
-            # Step 4: Extract just the date part from the datetime string
-            # Example format: 2025-05-05T07:56:26Z
-            user_df['Registration Date'] = user_df[created_at_col].apply(
-                lambda x: x.split('T')[0] if isinstance(x, str) and 'T' in x else x
-            )
-            
-            # Step 5: Filter for dates from April 15, 2025 onwards (no upper limit)
-            import datetime
-            import pandas as pd
-            
-            # Define the start date (April 15, 2025)
-            start_date = '2025-04-15'
-            
-            # Convert Registration Date to datetime for comparison
-            user_df['Date_Obj'] = pd.to_datetime(user_df['Registration Date'], errors='coerce')
-            
-            # Filter the DataFrame to include only rows with dates from April 15, 2025 onwards
-            if self.filter_date:
-                user_df = user_df[user_df['Date_Obj'] < pd.to_datetime(start_date)]
-            
-            logger.info(f"Filtered data from {start_date} onwards, remaining rows: {len(user_df)}")
-            
-            # Drop the helper column
-            user_df = user_df.drop('Date_Obj', axis=1)
-            
-            # Check if we have any data left after filtering
-            if len(user_df) == 0:
-                logger.warning("No data available after date filtering")
-                return None
-                
-            # Step 6: Handle empty or null referrals
-            # Replace empty or null values in Ref By column with "direct" or another appropriate label
-            user_df[ref_by_col] = user_df[ref_by_col].fillna('direct')
-            user_df.loc[user_df[ref_by_col] == '', ref_by_col] = 'direct'
-            
-            # Step 7: Group by date and referral source and count
-            # Create a count column (each row is one user)
-            user_df['count'] = 1
-            
-            # Create pivot table with dates as columns and referral sources as rows
-            pivot_df = pd.pivot_table(
-                user_df, 
-                values='count',
-                index=[ref_by_col],
-                columns=['Registration Date'],
-                aggfunc='sum',
-                fill_value=0
-            )
-            
-            # Convert the pivot table to a regular DataFrame
-            result_df = pivot_df.reset_index()
-            
-            # Step 8: Add a 'total' row at the bottom
-            # First, calculate column sums excluding the ref by column
-            totals = ['total']
-            for col in pivot_df.columns:
-                # Convert NumPy int64 to standard Python int
-                totals.append(int(pivot_df[col].sum()))
-            
-            # Convert to list of lists for Google Sheets and ensure all values are JSON serializable
-            result_data = []
-            for row in result_df.values:
-                # Convert each value in the row to standard Python types
-                converted_row = []
-                for val in row:
-                    if hasattr(val, 'item'):  # Check if it's a NumPy type with item() method
-                        converted_row.append(val.item())
-                    else:
-                        converted_row.append(val)
-                result_data.append(converted_row)
-            
-            # Create header row with Ref By and all dates
-            header = [ref_by_col] + [str(col) for col in pivot_df.columns]
-            
-            # Final data for sheet
-            sheet_data = [header] + result_data + [totals]
-            
-            # Step 9: Create or update the output spreadsheet
-            if not output_spreadsheet_name:
-                output_spreadsheet_name = "Daily_User_Registration_by_Referral"
-            
-            output_id = self.get_or_create_result_file(output_spreadsheet_name)
-            if not output_id:
-                logger.error("Failed to create or find output spreadsheet")
-                return None
-                
-            # Step 10: Write data to the spreadsheet
-            self.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
-            
-            logger.info(f"Successfully created daily referral count in '{output_spreadsheet_name}'")
-            return output_id
-            
-        except Exception as e:
-            logger.error(f"Error creating daily referral count: {e}")
+        combined_df = combined_df[combined_df['ID'].notna()].copy()
+        logger.info(f"Filtered non-null ID, remaining rows: {len(combined_df)}")
+        return combined_df
+    
+    def _generate_pivot_sheet(self, df, index_col, value_col='ID', output_spreadsheet_name=None, 
+                             default_sheet_name='', sort_index_desc=False):
+        """Generate a pivot table and write it to a Google Sheet."""
+        if df is None or index_col not in df.columns or value_col not in df.columns or 'SheetName' not in df.columns:
+            logger.error("Invalid DataFrame or missing required columns")
             return None
-
-    def count_users_by_source_name(self, output_spreadsheet_name=None):
-        """
-        Create a simple table that counts total users grouped by source name.
-        Reads data from the spreadsheet 'data', sheet 'User Register'.
         
-        Args:
-            output_spreadsheet_name: Name for the output spreadsheet (if None, will use default name)
+        pivot_table = DataFrameProcessor.create_pivot_table(
+            df, index=index_col, columns='SheetName', values=value_col
+        )
+        pivot_table = DataFrameProcessor.sort_columns(pivot_table, self._extract_number)
         
-        Returns:
-            The ID of the created/updated spreadsheet with count statistics
-        """
-        try:    
-            user_df = self.user_register_dataframe
-            if user_df is None:
-                return None
-                
-            # Step 3: Find the Source Name and Created At columns
-            source_name_col = None
-            created_at_col = None
-            
-            for col in user_df.columns:
-                if 'source' in col.lower() and 'name' in col.lower():
-                    source_name_col = col
-                if 'creat' in col.lower() and 'at' in col.lower():
-                    created_at_col = col
-            
-            if not source_name_col or not created_at_col:
-                logger.error("Required columns 'Source Name' and 'Created At' not found")
-                return None
-                
-            # Step 4: Extract just the date part from the datetime string and filter by date
-            # Example format: 2025-05-05T07:56:26Z
-            user_df['Registration Date'] = user_df[created_at_col].apply(
-                lambda x: x.split('T')[0] if isinstance(x, str) and 'T' in x else x
-            )
-            
-            # Step 5: Filter for dates from April 15, 2025 onwards
-            import pandas as pd
-            
-            # Define the start date (April 15, 2025)
-            start_date = '2025-04-15'
-            
-            # Convert Registration Date to datetime for comparison
-            user_df['Date_Obj'] = pd.to_datetime(user_df['Registration Date'], errors='coerce')
-            
-            # Filter the DataFrame to include only rows with dates from April 15, 2025 onwards
-            if self.filter_date:    
-                user_df = user_df[user_df['Date_Obj'] >= pd.to_datetime(start_date)]
-            
-            logger.info(f"Filtered data from {start_date} onwards, remaining rows: {len(user_df)}")
-            
-            # Drop the helper columns
-            user_df = user_df.drop(['Date_Obj', 'Registration Date'], axis=1)
-            
-            # Check if we have any data left after filtering
-            if len(user_df) == 0:
-                logger.warning("No data available after date filtering")
-                return None
-                
-            # Step 6: Count users by source name
-            source_counts = user_df[source_name_col].value_counts().reset_index()
-            source_counts.columns = ['Source Name', 'Count']
-            
-            # Step 7: Add total row
-            total_users = source_counts['Count'].sum()
-            total_row = pd.DataFrame([['Total', total_users]], columns=['Source Name', 'Count'])
-            source_counts = pd.concat([source_counts, total_row], ignore_index=True)
-            
-            # Step 8: Convert to list of lists for Google Sheets and ensure all values are JSON serializable
-            header = source_counts.columns.tolist()
-            
-            result_data = []
-            for row in source_counts.values:
-                # Convert each value in the row to standard Python types
-                converted_row = []
-                for val in row:
-                    if hasattr(val, 'item'):  # Check if it's a NumPy type with item() method
-                        converted_row.append(val.item())
-                    else:
-                        converted_row.append(val)
-                result_data.append(converted_row)
-            
-            # Final data for sheet
-            sheet_data = [header] + result_data
-            
-            # Step 9: Create or update the output spreadsheet
-            if not output_spreadsheet_name:
-                output_spreadsheet_name = "User_Count_by_Source"
-            
-            output_id = self.get_or_create_result_file(output_spreadsheet_name)
-            if not output_id:
-                logger.error("Failed to create or find output spreadsheet")
-                return None
-                
-            # Step 10: Write data to the spreadsheet
-            self.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
-            
-            logger.info(f"Successfully created source name count in '{output_spreadsheet_name}'")
-            return output_id
-            
-        except Exception as e:
-            logger.error(f"Error creating source name count: {e}")
+        if sort_index_desc:
+            pivot_table = pivot_table.sort_index(ascending=False)
+        
+        sheet_data = DataFrameProcessor.format_for_sheets(
+            pivot_table, index_col, date_format=CONFIG['date_format'] if index_col == 'Registration Date' else None
+        )
+        
+        output_spreadsheet_name = output_spreadsheet_name or default_sheet_name or 'Pivot_Sheet_Default'
+        output_id = self.google_service.get_or_create_result_file(self.folder_id, output_spreadsheet_name)
+        if not output_id:
+            logger.error(f"Failed to create or find output spreadsheet '{output_spreadsheet_name}'")
             return None
-
-    def count_users_by_ref(self, output_spreadsheet_name=None):
-        """
-        Create a table that counts users registered from each referrer.
-        Reads data from the spreadsheet 'data', sheet 'User Register'.
         
-        Args:
-            output_spreadsheet_name: Name for the output spreadsheet (if None, will use default name)
-        
-        Returns:
-            The ID of the created/updated spreadsheet with count statistics
-        """
-        try:    
-            user_df = self.user_register_dataframe
-            if user_df is None:
-                return None
-                
-            # Step 3: Find the Ref By and Created At columns
-            ref_by_col = None
-            created_at_col = None
-            
-            for col in user_df.columns:
-                if 'ref' in col.lower() and 'by' in col.lower():
-                    ref_by_col = col
-                if 'creat' in col.lower() and 'at' in col.lower():
-                    created_at_col = col
-            
-            if not ref_by_col or not created_at_col:
-                logger.error("Required columns 'Ref By' and 'Created At' not found")
-                return None
-                
-            # Step 4: Extract just the date part from the datetime string
-            # Example format: 2025-05-05T07:56:26Z
-            user_df['Registration Date'] = user_df[created_at_col].apply(
-                lambda x: x.split('T')[0] if isinstance(x, str) and 'T' in x else x
-            )
-            
-            # Step 4.5: Filter for dates from April 15, 2025 onwards (no upper limit)
-            
-            # Define the start date (April 15, 2025)
-            start_date = '2025-04-15'
-            
-            # Convert Registration Date to datetime for comparison
-            user_df['Date_Obj'] = pd.to_datetime(user_df['Registration Date'], errors='coerce')
-            
-            # Filter the DataFrame to include only rows with dates from April 15, 2025 onwards
-            if self.filter_date:    
-                user_df = user_df[user_df['Date_Obj'] < pd.to_datetime(start_date)]
-            
-            logger.info(f"Filtered data from {start_date} onwards, remaining rows: {len(user_df)}")
-            
-            # Drop the helper column
-            user_df = user_df.drop('Date_Obj', axis=1)
-            
-            # Check if we have any data left after filtering
-            if len(user_df) == 0:
-                logger.warning("No data available after date filtering")
-                return None
-            
-            # Step 5: Group by referrer and count
-            # Replace empty referrers with "direct"
-            user_df[ref_by_col] = user_df[ref_by_col].fillna("direct")
-            user_df[ref_by_col] = user_df[ref_by_col].replace('', "direct")
-            
-            # Count users by referrer
-            ref_counts = user_df[ref_by_col].value_counts().reset_index()
-            ref_counts.columns = [ref_by_col, 'User Count']
-            
-            # Step 6: Prepare data for Google Sheets
-            # Convert to list of lists for Google Sheets and ensure all values are JSON serializable
-            result_data = []
-            for row in ref_counts.values:
-                # Convert each value in the row to standard Python types
-                converted_row = []
-                for val in row:
-                    if hasattr(val, 'item'):  # Check if it's a NumPy type with item() method
-                        converted_row.append(val.item())
-                    else:
-                        converted_row.append(val)
-                result_data.append(converted_row)
-            
-            # Add total row (convert to standard int)
-            total_users = int(ref_counts['User Count'].sum())
-            result_data.append(["Total", total_users])
-            
-            # Create header
-            header = [ref_by_col, 'User Count']
-            
-            # Final data for sheet
-            sheet_data = [header] + result_data
-            
-            # Step 7: Create or update the output spreadsheet
-            if not output_spreadsheet_name:
-                output_spreadsheet_name = "User_Count_by_Referrer"
-            
-            output_id = self.get_or_create_result_file(output_spreadsheet_name)
-            if not output_id:
-                logger.error("Failed to create or find output spreadsheet")
-                return None
-                
-            # Step 8: Write data to the spreadsheet
-            self.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
-            
-            logger.info(f"Successfully created referrer count in '{output_spreadsheet_name}'")
-            return output_id
-            
-        except Exception as e:
-            logger.error(f"Error creating referrer count: {e}")
-            return None
-
-    def extract_number(self, sheet_name):
+        self.google_service.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
+        logger.info(f"Created pivot sheet in '{output_spreadsheet_name}'")
+        return output_id
+    
+    def _extract_number(self, sheet_name):
         """Extract number from sheet name for sorting."""
         try:
-            # Extract the first number from the sheet name (e.g., "1." from "1. Giới thiệu...")
             number_part = sheet_name.split('.')[0].strip()
             return int(number_part)
         except:
-            # If extraction fails, return a high number to sort at the end
             return 999
+    
+    def count_daily_registers_by_source_name(self, output_spreadsheet_name=None):
+        """Count daily user registrations by source name."""
+        user_df = self.user_register_dataframe
+        if user_df is None:
+            logger.error("user_register_dataframe is not initialized")
+            return None
+        
+        source_name_col = self._find_column(user_df, 'source_name')
+        created_at_col = self._find_column(user_df, 'created_at')
+        if not source_name_col or not created_at_col:
+            logger.error("Required columns 'Source Name' or 'Created At' not found")
+            return None
+        
+        user_df = user_df.copy()
+        user_df['Registration Date'] = DataFrameProcessor.extract_date(user_df[created_at_col])
+        user_df = DataFrameProcessor.filter_by_date(
+            user_df, 'Registration Date', CONFIG['start_date_filter'], self.filter_date, "Source Name"
+        )
+        
+        if user_df.empty:
+            logger.warning("No data after filtering")
+            return None
+        
+        user_df['count'] = 1
+        pivot_table = DataFrameProcessor.create_pivot_table(
+            user_df, index=source_name_col, columns='Registration Date', values='count', aggfunc='sum'
+        )
+        
+        # logger.info(f"Pivot table columns: {list(pivot_table.columns)}")
+        sheet_data = DataFrameProcessor.format_for_sheets(
+            pivot_table, source_name_col, date_format=CONFIG['date_format']
+        )
+        
+        output_spreadsheet_name = output_spreadsheet_name or "Daily_Registers_by_Source_Name"
+        output_id = self.google_service.get_or_create_result_file(self.folder_id, output_spreadsheet_name)
+        if not output_id:
+            logger.error(f"Failed to create or find output spreadsheet '{output_spreadsheet_name}'")
+            return None
+        
+        self.google_service.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
+        logger.info(f"Created daily source count in '{output_spreadsheet_name}'")
+        return output_id
+    
+    def count_daily_registers_by_ref(self, output_spreadsheet_name=None):
+        """Count daily user registrations by referral source."""
+        user_df = self.user_register_dataframe
+        if user_df is None:
+            logger.error("user_register_dataframe is not initialized")
+            return None
+        
+        ref_by_col = self._find_column(user_df, 'ref_by')
+        created_at_col = self._find_column(user_df, 'created_at')
+        if not ref_by_col or not created_at_col:
+            logger.error("Required columns 'Ref By' or 'Created At' not found")
+            return None
+        
+        user_df = user_df.copy()
+        user_df['Registration Date'] = DataFrameProcessor.extract_date(user_df[created_at_col])
+        user_df = DataFrameProcessor.filter_by_date(
+            user_df, 'Registration Date', CONFIG['start_date_filter'], self.filter_date, "Ref By"
+        )
+        
+        if user_df.empty:
+            logger.warning("No data after filtering")
+            return None
+        
+        user_df[ref_by_col] = user_df[ref_by_col].fillna('direct').replace('', 'direct')
+        user_df['count'] = 1
+        pivot_table = DataFrameProcessor.create_pivot_table(
+            user_df, index=ref_by_col, columns='Registration Date', values='count', aggfunc='sum'
+        )
+        
+        # logger.info(f"Pivot table columns: {list(pivot_table.columns)}")
+        sheet_data = DataFrameProcessor.format_for_sheets(
+            pivot_table, ref_by_col, date_format=CONFIG['date_format']
+        )
+        
+        output_spreadsheet_name = output_spreadsheet_name or "Daily_Registers_by_Ref"
+        output_id = self.google_service.get_or_create_result_file(self.folder_id, output_spreadsheet_name)
+        if not output_id:
+            logger.error(f"Failed to create or find output spreadsheet '{output_spreadsheet_name}'")
+            return None
+        
+        self.google_service.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
+        logger.info(f"Created daily referral count in '{output_spreadsheet_name}'")
+        return output_id
 
+    def count_users_by_source_name(self, output_spreadsheet_name=None):
+        """Count total users by source name."""
+        user_df = self.user_register_dataframe
+        if user_df is None:
+            logger.error("user_register_dataframe is not initialized")
+            return None
+        
+        source_name_col = self._find_column(user_df, 'source_name')
+        created_at_col = self._find_column(user_df, 'created_at')
+        if not source_name_col or not created_at_col:
+            logger.error("Required columns 'Source Name' or 'Created At' not found")
+            return None
+        
+        user_df = user_df.copy()
+        user_df['Registration Date'] = DataFrameProcessor.extract_date(user_df[created_at_col])
+        user_df = DataFrameProcessor.filter_by_date(
+            user_df, 'Registration Date', CONFIG['start_date_filter'], self.filter_date, "Source Name"
+        )
+        
+        if user_df.empty:
+            logger.warning("No data after filtering")
+            return None
+        
+        sheet_data = DataFrameProcessor.simple_count(user_df, source_name_col)
+        
+        output_spreadsheet_name = output_spreadsheet_name or "Users_by_Source_Name"
+        output_id = self.google_service.get_or_create_result_file(self.folder_id, output_spreadsheet_name)
+        if not output_id:
+            logger.error(f"Failed to create or find output spreadsheet '{output_spreadsheet_name}'")
+            return None
+        
+        self.google_service.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
+        logger.info(f"Created source name count in '{output_spreadsheet_name}'")
+        return output_id
+
+    def count_users_by_ref(self, output_spreadsheet_name=None):
+        """Count total users by referral source."""
+        user_df = self.user_register_dataframe
+        if user_df is None:
+            logger.error("user_register_dataframe is not initialized")
+            return None
+        
+        ref_by_col = self._find_column(user_df, 'ref_by')
+        created_at_col = self._find_column(user_df, 'created_at')
+        if not ref_by_col or not created_at_col:
+            logger.error("Required columns 'Ref By' or 'Created At' not found")
+            return None
+        
+        user_df = user_df.copy()
+        user_df['Registration Date'] = DataFrameProcessor.extract_date(user_df[created_at_col])
+        user_df = DataFrameProcessor.filter_by_date(
+            user_df, 'Registration Date', CONFIG['start_date_filter'], self.filter_date, "Ref By"
+        )
+        
+        if user_df.empty:
+            logger.warning("No data after filtering")
+            return None
+        
+        user_df[ref_by_col] = user_df[ref_by_col].fillna('direct').replace('', 'direct')
+        sheet_data = DataFrameProcessor.simple_count(user_df, ref_by_col, 'User Count')
+        
+        output_spreadsheet_name = output_spreadsheet_name or "Users_by_Ref"
+        output_id = self.google_service.get_or_create_result_file(self.folder_id, output_spreadsheet_name)
+        if not output_id:
+            logger.error(f"Failed to create or find output spreadsheet '{output_spreadsheet_name}'")
+            return None
+        
+        self.google_service.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
+        logger.info(f"Created referrer count in '{output_spreadsheet_name}'")
+        return output_id
+    
     def count_users_each_sheet_by_source_name(self, output_spreadsheet_name=None):
-        """
-        Create a table that counts users from each source name across different sheets.
-        Reads data from the spreadsheet 'data', all available sheets that contain user data.
-        
-        Args:
-            output_spreadsheet_name: Name for the output spreadsheet (if None, will use default name)
-        
-        Returns:
-            The ID of the created/updated spreadsheet with count statistics
-        """
-        try:
-            combined_df = self.videos_dataframe
-            
-            # Step 6: Filter data
-            required_columns = ['ID', 'Source Name', 'Created At', 'SheetName']
-            
-            # Check if all required columns exist
-            for column in required_columns[:-1]:  # SheetName was added by us
-                if column not in combined_df.columns:
-                    logger.error(f"Required column '{column}' not found")
-                    return None
-            
-            # Filter rows with valid User ID
-            combined_df = combined_df[combined_df['ID'].notna()].copy()
-            
-            # Filter rows with valid Source Name
-            combined_df = combined_df.dropna(subset=['Source Name']).copy()
-            
-            # Step 7: Create pivot table
-            pivot_table = pd.pivot_table(
-                combined_df,
-                index='Source Name',
-                columns='SheetName',
-                values='ID',
-                aggfunc='count',
-                fill_value=0
-            )
-
-
-            
-            if pivot_table.columns.size > 0:
-                try:
-                    sorted_columns = sorted(pivot_table.columns, key=self.extract_number)
-                    pivot_table = pivot_table[sorted_columns]
-                except Exception as e:
-                    logger.warning(f"Could not sort columns: {e}")
-            
-            # Step 9: Convert pivot table to list format for Google Sheets
-            # First, reset index to make Source Name a column
-            result_df = pivot_table.reset_index()
-            
-            # Convert to list of lists for Google Sheets and ensure all values are JSON serializable
-            header = ['Source Name'] + list(pivot_table.columns)
-            
-            result_data = []
-            for row in result_df.values:
-                # Convert each value in the row to standard Python types
-                converted_row = []
-                for val in row:
-                    if hasattr(val, 'item'):  # Check if it's a NumPy type with item() method
-                        converted_row.append(val.item())
-                    else:
-                        converted_row.append(val)
-                result_data.append(converted_row)
-                
-            # Step 10: Calculate totals for each column
-            totals = ['Total']
-            for col in pivot_table.columns:
-                totals.append(int(pivot_table[col].sum()))
-                
-            # Step 11: Final data to write to sheet
-            sheet_data = [header] + result_data + [totals]
-            
-            # Step 12: Create or update the output spreadsheet
-            if not output_spreadsheet_name:
-                output_spreadsheet_name = "User_Count_by_Source_Across_Sheets"
-            
-            output_id = self.get_or_create_result_file(output_spreadsheet_name)
-            if not output_id:
-                logger.error("Failed to create or find output spreadsheet")
-                return None
-                
-            # Step 13: Write data to the spreadsheet
-            self.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
-            
-            logger.info(f"Successfully created source count across sheets in '{output_spreadsheet_name}'")
-            return output_id
-            
-        except Exception as e:
-            logger.error(f"Error creating source count across sheets: {e}")
+        """Count users by source name across sheets."""
+        required_columns = ['ID', 'Source Name', 'Created At', 'SheetName']
+        df = self._prepare_combined_df(required_columns)
+        if df is None:
             return None
-
+        
+        df = df.dropna(subset=['Source Name'])
+        logger.info(f"Filtered non-null Source Name, remaining rows: {len(df)}")
+        
+        return self._generate_pivot_sheet(
+            df, 'Source Name', output_spreadsheet_name=output_spreadsheet_name,
+            default_sheet_name="Users_Each_Sheet_by_Source_Name"
+        )
+    
     def count_users_each_sheet_by_ref(self, output_spreadsheet_name=None):
-        """
-        Create a table that counts users from each referral source across different sheets.
-        Reads data from the spreadsheet 'data', all available sheets that contain user data.
-        
-        Args:
-            output_spreadsheet_name: Name for the output spreadsheet (if None, will use default name)
-        
-        Returns:
-            The ID of the created/updated spreadsheet with count statistics
-        """
-        try:
-            
-            combined_df = self.videos_dataframe
-            
-            # Step 6: Filter data
-            required_columns = ['ID', 'Ref By', 'Created At', 'SheetName']
-            
-            # Check if all required columns exist except 'Ref By' which we'll handle specially
-            for column in ['ID', 'Created At']:
-                if column not in combined_df.columns:
-                    logger.error(f"Required column '{column}' not found")
-                    return None
-            
-            # Check if 'Ref By' column exists, if not check if we can use an alternative column
-            if 'Ref By' not in combined_df.columns:
-                logger.warning("'Ref By' column not found")
-                return None
-            
-            # Filter rows with valid User ID
-            combined_df = combined_df[combined_df['ID'].notna()].copy()
-            
-            # Fill empty 'Ref By' values with 'direct'
-            combined_df.loc[(combined_df['Ref By'] == ''), 'Ref By'] = 'direct'
-            combined_df['Ref By'] = combined_df['Ref By'].fillna('direct')
-            
-            # Step 7: Create pivot table
-            pivot_table = pd.pivot_table(
-                combined_df,
-                index='Ref By',
-                columns='SheetName',
-                values='ID',
-                aggfunc='count',
-                fill_value=0
-            )
-            
-            if pivot_table.columns.size > 0:
-                try:
-                    sorted_columns = sorted(pivot_table.columns, key=self.extract_number)
-                    pivot_table = pivot_table[sorted_columns]
-                except Exception as e:
-                    logger.warning(f"Could not sort columns: {e}")
-            
-            # Step 9: Convert pivot table to list format for Google Sheets
-            # First, reset index to make Ref By a column
-            result_df = pivot_table.reset_index()
-            
-            # Convert to list of lists for Google Sheets and ensure all values are JSON serializable
-            header = ['Ref By'] + list(pivot_table.columns)
-            
-            result_data = []
-            for row in result_df.values:
-                # Convert each value in the row to standard Python types
-                converted_row = []
-                for val in row:
-                    if hasattr(val, 'item'):  # Check if it's a NumPy type with item() method
-                        converted_row.append(val.item())
-                    else:
-                        converted_row.append(val)
-                result_data.append(converted_row)
-                
-            # Step 10: Calculate totals for each column
-            totals = ['Total']
-            for col in pivot_table.columns:
-                totals.append(int(pivot_table[col].sum()))
-                
-            # Step 11: Final data to write to sheet
-            sheet_data = [header] + result_data + [totals]
-            
-            # Step 12: Create or update the output spreadsheet
-            if not output_spreadsheet_name:
-                output_spreadsheet_name = "User_Count_by_Referral_Across_Sheets"
-            
-            output_id = self.get_or_create_result_file(output_spreadsheet_name)
-            if not output_id:
-                logger.error("Failed to create or find output spreadsheet")
-                return None
-                
-            # Step 13: Write data to the spreadsheet
-            self.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
-            
-            logger.info(f"Successfully created referral count across sheets in '{output_spreadsheet_name}'")
-            return output_id
-            
-        except Exception as e:
-            logger.error(f"Error creating referral count across sheets: {e}")
+        """Count users by referral source across sheets."""
+        required_columns = ['ID', 'Ref By', 'Created At', 'SheetName']
+        df = self._prepare_combined_df(required_columns)
+        if df is None:
             return None
-
+        
+        if 'Ref By' not in df.columns:
+            logger.warning("'Ref By' column not found")
+            return None
+        
+        df['Ref By'] = df['Ref By'].fillna('direct').replace('', 'direct')
+        logger.info(f"Filtered non-null ID and set default 'Ref By', remaining rows: {len(df)}")
+        
+        return self._generate_pivot_sheet(
+            df, 'Ref By', output_spreadsheet_name=output_spreadsheet_name,
+            default_sheet_name="Users_Each_Sheet_by_Ref"
+        )
+    
     def count_users_each_sheet_by_date(self, output_spreadsheet_name=None):
-        """
-        Create a table that counts users for each date across different sheets.
-        Reads data from the spreadsheet 'data', all available sheets that contain user data.
-        
-        Args:
-            output_spreadsheet_name: Name for the output spreadsheet (if None, will use default name)
-        
-        Returns:
-            The ID of the created/updated spreadsheet with count statistics
-        """
-        try:
-            
-            combined_df = self.videos_dataframe
-            
-            # Step 6: Filter data
-            required_columns = ['ID', 'Created At', 'SheetName']
-            
-            # Check if required columns exist
-            for column in required_columns:
-                if column not in combined_df.columns:
-                    logger.error(f"Required column '{column}' not found")
-                    return None
-            
-            # Filter rows with valid User ID and Created At
-            combined_df = combined_df[combined_df['ID'].notna() & combined_df['Created At'].notna()].copy()
-            
-            # Check if we have any data left after filtering
-            if len(combined_df) == 0:
-                logger.warning("No data available after filtering")
-                return None
-            
-            # Step 7: Extract date from 'Created At' column
-            # Example format: 2025-05-05T07:56:26Z
-            combined_df['Registration Date'] = combined_df['Created At'].apply(
-                lambda x: x.split('T')[0] if isinstance(x, str) and 'T' in x else x
-            )
-
-            combined_df['Registration Date'] = pd.to_datetime(combined_df['Registration Date'], errors='coerce', dayfirst=True)
-            
-            # Step 8: Create pivot table with dates as rows and sheets as columns
-            pivot_table = pd.pivot_table(
-                combined_df,
-                index='Registration Date',
-                columns='SheetName',
-                values='ID',
-                aggfunc='count',
-                fill_value=0
-            )
-            
-            # Step 9: Sort columns by their course order (1., 2., 3., etc.)
-            
-            if pivot_table.columns.size > 0:
-                try:
-                    sorted_columns = sorted(pivot_table.columns, key=self.extract_number)
-                    pivot_table = pivot_table[sorted_columns]
-                except Exception as e:
-                    logger.warning(f"Could not sort columns: {e}")
-            
-            # Step 10: Sort the index (dates) in descending order (newest first)
-            pivot_table = pivot_table.sort_index(ascending=False)
-            
-            # Step 11: Convert pivot table to list format for Google Sheets
-            # First, reset index to make Registration Date a column
-            result_df = pivot_table.reset_index()
-
-            result_df['Registration Date'] = result_df['Registration Date'].dt.strftime('%d/%m/%Y')
-
-            
-            # Convert to list of lists for Google Sheets and ensure all values are JSON serializable
-            header = ['Registration Date'] + list(pivot_table.columns)
-            
-            result_data = []
-            for row in result_df.values:
-                # Convert each value in the row to standard Python types
-                converted_row = []
-                for val in row:
-                    if hasattr(val, 'item'):  # Check if it's a NumPy type with item() method
-                        converted_row.append(val.item())
-                    else:
-                        converted_row.append(val)
-                result_data.append(converted_row)
-                
-            # Step 12: Calculate totals for each column
-            totals = ['Total']
-            for col in pivot_table.columns:
-                totals.append(int(pivot_table[col].sum()))
-                
-            # Step 13: Final data to write to sheet
-            sheet_data = [header] + result_data + [totals]
-            
-            # Step 14: Create or update the output spreadsheet
-            if not output_spreadsheet_name:
-                output_spreadsheet_name = "User_Count_by_Date_Across_Sheets"
-            
-            output_id = self.get_or_create_result_file(output_spreadsheet_name)
-            if not output_id:
-                logger.error("Failed to create or find output spreadsheet")
-                return None
-                
-            # Step 15: Write data to the spreadsheet
-            self.write_spreadsheet_data(output_id, 'Sheet1', sheet_data)
-            
-            logger.info(f"Successfully created date-based user count across sheets in '{output_spreadsheet_name}'")
-            return output_id
-            
-        except Exception as e:
-            logger.error(f"Error creating date-based user count across sheets: {e}")
+        """Count users by date across sheets."""
+        required_columns = ['ID', 'Created At', 'SheetName']
+        df = self._prepare_combined_df(required_columns)
+        if df is None:
             return None
+        
+        df = df[df['Created At'].notna()].copy()
+        df['Registration Date'] = DataFrameProcessor.extract_date(df['Created At'])
+        
+        if df['Registration Date'].isna().all():
+            logger.warning("No valid dates after processing")
+            return None
+        
+        logger.info(f"Processed dates, remaining rows: {len(df)}")
+        return self._generate_pivot_sheet(
+            df, 'Registration Date', output_spreadsheet_name=output_spreadsheet_name,
+            default_sheet_name="Users_Each_Sheet_by_Date", sort_index_desc=True
+        )
+
+
+def process(folder_id, data_speadsheet_name = 'data', filter_date=True):
+    processor = DriveDataProcessor(folder_id=folder_id,  filter_date=filter_date)
+    processor.count_daily_registers_by_source_name(output_spreadsheet_name='daily_registers_by_source_name')
+    processor.count_daily_registers_by_ref(output_spreadsheet_name='daily_registers_by_ref')
+    processor.count_users_by_ref(output_spreadsheet_name="users_by_ref")
+    processor.count_users_by_source_name(output_spreadsheet_name="users_by_source_name")
+    processor.count_users_each_sheet_by_ref(output_spreadsheet_name="users_each_sheet_by_ref")
+    processor.count_users_each_sheet_by_source_name(output_spreadsheet_name="users_each_sheet_by_source_name")
+    processor.count_users_each_sheet_by_date(output_spreadsheet_name="users_each_sheet_by_date")
+    
 
 if __name__ == '__main__':
-    processor = DriveDataProcessor(folder_id = FOLDER_ID, filter_date = True)
-    # processor.count_daily_registers_by_source_name(output_spreadsheet_name="Daily_Registers_by_Source_Name")
-    # processor.count_daily_registers_by_ref(output_spreadsheet_name="Daily_Registers_by_Ref")
-    # processor.count_users_by_source_name(output_spreadsheet_name="Users_by_Source_Name")
-    # processor.count_users_by_ref(output_spreadsheet_name="Users_by_Ref")
-    # processor.count_users_each_sheet_by_source_name(output_spreadsheet_name="Users_Each_Sheet_by_Source_Name")
-    # processor.count_users_each_sheet_by_ref(output_spreadsheet_name="Users_Each_Sheet_by_Ref")
-    processor.count_users_each_sheet_by_date(output_spreadsheet_name="Users_Each_Sheet_by_Date")
+    folder_id = '1OAgBQotTPAhSnreHt3rR0VW61j-k6_1g'
+    data_speadsheet_name = 'data1'
+    filter_date = False
+    process(folder_id, data_speadsheet_name, filter_date)
